@@ -1,0 +1,9 @@
+[project]
+name = "ff-services-pymupdf"
+version = "0.1.0"
+description = "PyMuPDF-based PDF processing gRPC microservice"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment
+.env
+.envrc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated gRPC stubs
+src/pymupdf_worker_pb2.py
+src/pymupdf_worker_pb2_grpc.py
+
+# TypeScript client (generated)
+packages/client-ts/src/generated/
+packages/client-ts/node_modules/
+packages/client-ts/dist/
+packages/client-ts/package-lock.json

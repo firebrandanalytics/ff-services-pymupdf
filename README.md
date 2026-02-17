@@ -1,6 +1,6 @@
 # ff-services-pymupdf
 
-A fast, lightweight PDF processing microservice powered by [PyMuPDF](https://pymupdf.readthedocs.io/). Part of the [FireFoundry](https://github.com/firebrandanalytics) document processing platform.
+A fast, lightweight PDF processing microservice powered by [PyMuPDF](https://pymupdf.readthedocs.io/).
 
 ## Features
 
@@ -9,7 +9,7 @@ A fast, lightweight PDF processing microservice powered by [PyMuPDF](https://pym
 - **Table extraction** — detects and extracts table structures with cell spans
 - **Image extraction** — extracts embedded images with bounding box positions
 - **Text layer detection** — per-page analysis of whether extractable text exists (useful for routing scanned pages to OCR)
-- **HTML generation** — produces structured HTML matching the `DocumentAnalysisResult` format used across FireFoundry services
+- **HTML generation** — produces structured HTML matching the `DocumentAnalysisResult` format
 
 ## How It Fits
 
@@ -103,7 +103,7 @@ uv pip install -e ".[dev]"
 
 ### Run
 ```bash
-uvicorn app.main:app --reload --port 8089
+uvicorn src.http_server:app --reload --port 8089
 ```
 
 ### Test

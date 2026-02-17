@@ -1,0 +1,33 @@
+{
+  "name": "@firebrandanalytics/pymupdf-worker-client",
+  "version": "0.1.0",
+  "description": "TypeScript gRPC client for FireFoundry PyMuPDF Processing Worker",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "AGPL-3.0-or-later",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "generate": "scripts/generate.sh",
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.9.0",
+    "protobufjs": "^7.2.0"
+  },
+  "devDependencies": {
+    "ts-proto": "^1.165.0",
+    "typescript": "^5.3.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/firebrandanalytics/ff-services-pymupdf.git",
+    "directory": "packages/client-ts"
+  }
+}

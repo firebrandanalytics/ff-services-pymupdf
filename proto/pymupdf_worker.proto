@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package pymupdf_worker;
+
+// PyMuPDFWorker service provides PDF text extraction and analysis
+service PyMuPDFWorker {
+  // Check if the worker supports a specific operation
+  rpc SupportsOperation(OperationRequest) returns (SupportResponse);
+
+  // Process a PDF document with the specified operation
+  rpc ProcessDocument(ProcessRequest) returns (ProcessResponse);
+
+  // Health check endpoint
+  rpc HealthCheck(Empty) returns (HealthResponse);
+}
+
+// Request to check if an operation is supported
+message OperationRequest {
+  string operation = 1;  // e.g., "extract", "detect_text_layer"
+  string format = 2;     // Optional: input format hint
+}
+
+// Response indicating if an operation is supported
+message SupportResponse {
+  bool supported = 1;
+  string message = 2;
+}
+
+// Request to process a document
+message ProcessRequest {
+  bytes document_data = 1;
+  string operation = 2;
+  map<string, string> options = 3;
+}
+
+// Response containing processed document
+message ProcessResponse {
+  bytes output_data = 1;
+  string format = 2;
+  map<string, string> metadata = 3;
+  int32 processing_time_ms = 4;
+  bool success = 5;
+  string error_message = 6;
+}
+
+// Empty message for requests with no parameters
+message Empty {}
+
+// Health check response
+message HealthResponse {
+  bool healthy = 1;
+  string version = 2;
+  repeated string supported_operations = 3;
+}
