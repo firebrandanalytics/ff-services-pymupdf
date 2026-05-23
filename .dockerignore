@@ -27,6 +27,9 @@ ENV/
 .github/
 .gitignore
 
+# TypeScript client package (not needed in Python container)
+packages/
+
 # Testing
 .pytest_cache/
 .coverage
