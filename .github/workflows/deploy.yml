@@ -1,0 +1,143 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main, dev, 'feat/**', 'fix/**']
+  workflow_dispatch:
+
+env:
+  ACR_REGISTRY: firebranddevet.azurecr.io
+  IMAGE_NAME: doc-proc-pymupdf
+  NODE_VERSION: "20"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  build-and-push-image:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image_tag: ${{ steps.get_version.outputs.image_tag }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version and set tag
+        id: get_version
+        run: |
+          VERSION=$(grep -oP 'version = "\K[^"]+' pyproject.toml)
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          BRANCH="${{ github.ref_name }}"
+
+          if [ "$BRANCH" = "main" ]; then
+            IMAGE_TAG="$VERSION"
+          elif [ "$BRANCH" = "dev" ]; then
+            IMAGE_TAG="${VERSION}-dev.${SHORT_SHA}"
+          else
+            SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9]/-/g')
+            IMAGE_TAG="${VERSION}-${SAFE_BRANCH}.${SHORT_SHA}"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Image tag: $IMAGE_TAG"
+
+      - name: Validate version uniqueness (main only)
+        if: github.ref_name == 'main'
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          echo "Checking if ${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION} already exists..."
+          if docker pull "${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}" 2>/dev/null; then
+            echo "Error: Image tag ${VERSION} already exists in registry."
+            echo "Increment the version in pyproject.toml before merging to main."
+            exit 1
+          fi
+          echo "Version ${VERSION} is available."
+
+      - name: Login to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: firebranddevet
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}"
+          TAG="${{ steps.get_version.outputs.image_tag }}"
+
+          docker build -t "${IMAGE}:${TAG}" .
+          docker push "${IMAGE}:${TAG}"
+
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            docker tag "${IMAGE}:${TAG}" "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          elif [ "${{ github.ref_name }}" = "dev" ]; then
+            docker tag "${IMAGE}:${TAG}" "${IMAGE}:dev"
+            docker push "${IMAGE}:dev"
+          fi
+
+  publish-client:
+    name: Publish TypeScript Client
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://npm.pkg.github.com
+          scope: '@firebrandanalytics'
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install client dependencies
+        working-directory: packages/client-ts
+        run: npm install
+
+      - name: Generate gRPC stubs
+        working-directory: packages/client-ts
+        run: |
+          chmod +x scripts/generate.sh
+          scripts/generate.sh
+
+      - name: Sync version from pyproject.toml
+        run: |
+          VERSION=$(grep -oP 'version = "\K[^"]+' pyproject.toml)
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          BRANCH="${{ github.ref_name }}"
+
+          if [ "$BRANCH" = "main" ]; then
+            PUBLISH_VERSION="$VERSION"
+          elif [ "$BRANCH" = "dev" ]; then
+            PUBLISH_VERSION="${VERSION}-dev.${SHORT_SHA}"
+          else
+            SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9]/-/g')
+            PUBLISH_VERSION="${VERSION}-${SAFE_BRANCH}.${SHORT_SHA}"
+          fi
+
+          cd packages/client-ts
+          npm version "$PUBLISH_VERSION" --no-git-tag-version --allow-same-version
+          echo "Publishing version: $PUBLISH_VERSION"
+
+      - name: Build TypeScript
+        working-directory: packages/client-ts
+        run: npm run build
+
+      - name: Publish to GitHub Packages
+        working-directory: packages/client-ts
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          if [ "$BRANCH" = "main" ]; then
+            npm publish
+          else
+            npm publish --tag "$BRANCH"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
