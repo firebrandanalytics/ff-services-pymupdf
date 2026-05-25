@@ -1,6 +1,5 @@
 """Tests for the render-region functionality and HTTP endpoint."""
 
-import base64
 import io
 import struct
 
@@ -71,6 +70,20 @@ class TestRenderRegionUnit:
         assert meta.downscaled is False
         assert meta.width_px == w
         assert meta.height_px == h
+
+    def test_jpg_output(self):
+        pdf = make_test_pdf()
+        img, meta = render_region(
+            pdf, 0, (50.0, 50.0, 400.0, 450.0), dpi=144, output_format="jpg"
+        )
+        # JPEG SOI marker.
+        assert img[:2] == b"\xff\xd8"
+        assert meta.width_px > 0 and meta.height_px > 0
+
+    def test_invalid_output_format_rejected(self):
+        pdf = make_test_pdf()
+        with pytest.raises(RegionRenderError, match="Invalid output_format"):
+            render_region(pdf, 0, (50.0, 50.0, 100.0, 100.0), output_format="webp")
 
     def test_bbox_exceeds_page_is_clipped(self):
         """A bbox that extends past the page bounds should be clipped, not rejected."""
@@ -168,37 +181,68 @@ def client():
     return TestClient(create_app())
 
 
-class TestRenderRegionEndpoint:
-    def _body(self, pdf: bytes, **overrides):
-        body = {
-            "pdf_bytes": base64.b64encode(pdf).decode("ascii"),
-            "page": 0,
-            "bbox": {"x0": 50.0, "y0": 50.0, "x1": 400.0, "y1": 450.0},
-            "dpi": 144,
-            "max_dim_px": 2048,
-        }
-        body.update(overrides)
-        return body
+def _multipart(pdf: bytes, **fields):
+    """Build TestClient args for the multipart render-region contract.
 
+    Mirrors what `DocProcLayoutClient.renderRegion` sends from rag-agent-bundle:
+    file + page (1-based) + x_min/y_min/x_max/y_max + dpi + format + max_dim_px.
+    """
+    defaults = {
+        "page": "1",
+        "x_min": "50.0",
+        "y_min": "50.0",
+        "x_max": "400.0",
+        "y_max": "450.0",
+        "dpi": "144",
+        "format": "png",
+        "max_dim_px": "2048",
+    }
+    # Cast every override to str — multipart fields are always sent as strings.
+    for k, v in fields.items():
+        defaults[k] = str(v)
+    return {
+        "files": {"file": ("document.pdf", io.BytesIO(pdf), "application/pdf")},
+        "data": defaults,
+    }
+
+
+class TestRenderRegionEndpoint:
     def test_happy_path(self, client):
         pdf = make_test_pdf()
-        r = client.post("/api/render-region", json=self._body(pdf))
-        assert r.status_code == 200
+        r = client.post("/api/render-region", **_multipart(pdf))
+        assert r.status_code == 200, r.text
         assert r.headers["content-type"] == "image/png"
         assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
-        assert int(r.headers["x-image-width"]) > 0
-        assert int(r.headers["x-image-height"]) > 0
-        assert r.headers["x-page-index"] == "0"
+        # Bundle-facing headers (DocProcLayoutClient reads these).
+        assert int(r.headers["x-width-px"]) > 0
+        assert int(r.headers["x-height-px"]) > 0
+        assert int(r.headers["x-render-time-ms"]) >= 0
+        # Page echoes as 1-based (matches request convention).
+        assert r.headers["x-page-number"] == "1"
         assert r.headers["x-clipped-to-page"] == "false"
         assert r.headers["x-downscaled"] == "false"
+
+    def test_jpg_format(self, client):
+        pdf = make_test_pdf()
+        r = client.post("/api/render-region", **_multipart(pdf, format="jpg"))
+        assert r.status_code == 200, r.text
+        assert r.headers["content-type"] == "image/jpeg"
+        # JPEG SOI marker.
+        assert r.content[:2] == b"\xff\xd8"
+
+    def test_invalid_format_returns_400(self, client):
+        pdf = make_test_pdf()
+        r = client.post("/api/render-region", **_multipart(pdf, format="webp"))
+        assert r.status_code == 400
+        assert "format" in r.json()["detail"]["error"].lower()
 
     def test_bbox_exceeds_page_clipped(self, client):
         pdf = make_test_pdf()
         r = client.post(
             "/api/render-region",
-            json=self._body(pdf, bbox={"x0": 0, "y0": 0, "x1": 10000, "y1": 10000}),
+            **_multipart(pdf, x_min=0, y_min=0, x_max=10000, y_max=10000),
         )
-        assert r.status_code == 200
+        assert r.status_code == 200, r.text
         assert r.headers["x-clipped-to-page"] == "true"
         assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
 
@@ -206,102 +250,122 @@ class TestRenderRegionEndpoint:
         pdf = make_test_pdf()
         r = client.post(
             "/api/render-region",
-            json=self._body(pdf, bbox={"x0": 5000, "y0": 5000, "x1": 6000, "y1": 6000}),
+            **_multipart(pdf, x_min=5000, y_min=5000, x_max=6000, y_max=6000),
         )
         assert r.status_code == 400
         assert "does not intersect" in r.json()["detail"]["error"]
 
     def test_invalid_bbox_returns_400(self, client):
         pdf = make_test_pdf()
-        # x0 >= x1
+        # x_min >= x_max
         r = client.post(
             "/api/render-region",
-            json=self._body(pdf, bbox={"x0": 400, "y0": 50, "x1": 100, "y1": 200}),
+            **_multipart(pdf, x_min=400, y_min=50, x_max=100, y_max=200),
         )
         assert r.status_code == 400
         assert "x0" in r.json()["detail"]["error"]
 
     def test_page_out_of_range_returns_400(self, client):
         pdf = make_test_pdf(num_pages=2)
-        r = client.post("/api/render-region", json=self._body(pdf, page=10))
+        # 1-based page=10 → page_index=9, out of range for a 2-page doc.
+        r = client.post("/api/render-region", **_multipart(pdf, page=10))
         assert r.status_code == 400
         assert "out of range" in r.json()["detail"]["error"]
 
-    def test_negative_page_returns_400(self, client):
-        """Negative page is rejected by the renderer with a descriptive 400."""
+    def test_page_zero_returns_400(self, client):
+        """page=0 is invalid (1-based); endpoint rejects before calling renderer."""
         pdf = make_test_pdf()
-        r = client.post("/api/render-region", json=self._body(pdf, page=-1))
+        r = client.post("/api/render-region", **_multipart(pdf, page=0))
         assert r.status_code == 400
-        assert "page_index" in r.json()["detail"]["error"]
+        assert "1-based" in r.json()["detail"]["error"]
 
-    def test_dpi_out_of_range_returns_422(self, client):
-        """Pydantic catches dpi outside [36, 600] before the renderer runs."""
+    def test_negative_page_returns_400(self, client):
         pdf = make_test_pdf()
-        r = client.post("/api/render-region", json=self._body(pdf, dpi=10000))
-        assert r.status_code == 422
+        r = client.post("/api/render-region", **_multipart(pdf, page=-1))
+        assert r.status_code == 400
+        assert "1-based" in r.json()["detail"]["error"]
 
-    def test_max_dim_out_of_range_returns_422(self, client):
+    def test_dpi_out_of_range_returns_400(self, client):
+        """dpi outside [36, 600] reaches the renderer and is rejected with a 400."""
         pdf = make_test_pdf()
-        r = client.post("/api/render-region", json=self._body(pdf, max_dim_px=0))
-        assert r.status_code == 422
+        r = client.post("/api/render-region", **_multipart(pdf, dpi=10000))
+        assert r.status_code == 400
+        assert "dpi" in r.json()["detail"]["error"].lower()
+
+    def test_max_dim_out_of_range_returns_400(self, client):
+        pdf = make_test_pdf()
+        r = client.post("/api/render-region", **_multipart(pdf, max_dim_px=0))
+        assert r.status_code == 400
+        assert "max_dim_px" in r.json()["detail"]["error"]
 
     def test_malformed_pdf_returns_422(self, client):
         bad = b"this is definitely not a pdf"
-        body = {
-            "pdf_bytes": base64.b64encode(bad).decode("ascii"),
-            "page": 0,
-            "bbox": {"x0": 0, "y0": 0, "x1": 100, "y1": 100},
-        }
-        r = client.post("/api/render-region", json=body)
+        r = client.post(
+            "/api/render-region",
+            **_multipart(bad, x_min=0, y_min=0, x_max=100, y_max=100),
+        )
         assert r.status_code == 422
         assert "PDF" in r.json()["detail"]["error"]
-
-    def test_invalid_base64_returns_400(self, client):
-        body = {
-            "pdf_bytes": "%%%not-base64%%%",
-            "page": 0,
-            "bbox": {"x0": 0, "y0": 0, "x1": 100, "y1": 100},
-        }
-        r = client.post("/api/render-region", json=body)
-        assert r.status_code == 400
-        assert "base64" in r.json()["detail"]["error"].lower()
 
     def test_max_dim_downscale_via_endpoint(self, client):
         pdf = make_test_pdf()
         r = client.post(
             "/api/render-region",
-            json=self._body(
+            **_multipart(
                 pdf,
-                bbox={"x0": 0, "y0": 0, "x1": 612, "y1": 792},
+                x_min=0,
+                y_min=0,
+                x_max=612,
+                y_max=792,
                 dpi=144,
                 max_dim_px=300,
             ),
         )
-        assert r.status_code == 200
+        assert r.status_code == 200, r.text
         assert r.headers["x-downscaled"] == "true"
-        assert int(r.headers["x-image-width"]) <= 301
-        assert int(r.headers["x-image-height"]) <= 301
+        assert int(r.headers["x-width-px"]) <= 301
+        assert int(r.headers["x-height-px"]) <= 301
 
     def test_defaults_applied(self, client):
-        """dpi and max_dim_px default to 144 and 2048 when omitted."""
+        """dpi, format, and max_dim_px have defaults; only the bbox+file+page are required."""
         pdf = make_test_pdf()
-        body = {
-            "pdf_bytes": base64.b64encode(pdf).decode("ascii"),
-            "page": 0,
-            "bbox": {"x0": 50, "y0": 50, "x1": 400, "y1": 450},
+        files = {"file": ("document.pdf", io.BytesIO(pdf), "application/pdf")}
+        data = {
+            "page": "1",
+            "x_min": "50",
+            "y_min": "50",
+            "x_max": "400",
+            "y_max": "450",
         }
-        r = client.post("/api/render-region", json=body)
-        assert r.status_code == 200
+        r = client.post("/api/render-region", files=files, data=data)
+        assert r.status_code == 200, r.text
+        assert r.headers["content-type"] == "image/png"
         assert r.headers["x-dpi-used"] == "144"
         assert r.headers["x-downscaled"] == "false"
 
     def test_missing_required_field_422(self, client):
-        # Missing bbox
-        body = {
-            "pdf_bytes": base64.b64encode(make_test_pdf()).decode("ascii"),
-            "page": 0,
+        # Missing y_max
+        pdf = make_test_pdf()
+        files = {"file": ("document.pdf", io.BytesIO(pdf), "application/pdf")}
+        data = {
+            "page": "1",
+            "x_min": "50",
+            "y_min": "50",
+            "x_max": "400",
         }
-        r = client.post("/api/render-region", json=body)
+        r = client.post("/api/render-region", files=files, data=data)
+        assert r.status_code == 422
+
+    def test_missing_file_422(self, client):
+        # Multipart with no file part — FastAPI rejects with 422.
+        data = {
+            "page": "1",
+            "x_min": "50",
+            "y_min": "50",
+            "x_max": "400",
+            "y_max": "450",
+        }
+        r = client.post("/api/render-region", data=data)
         assert r.status_code == 422
 
 
