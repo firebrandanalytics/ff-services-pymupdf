@@ -53,10 +53,14 @@ class BBox(BaseModel):
 class RenderRegionRequest(BaseModel):
     """Request body for POST /api/render-region."""
     pdf_bytes: str = Field(..., description="Base64-encoded PDF data")
-    page: int = Field(..., ge=0, description="0-indexed page number")
+    # No `ge` on page — let the renderer return 400 with a descriptive
+    # message instead of Pydantic's generic 422.
+    page: int = Field(..., description="0-indexed page number")
     bbox: BBox
-    dpi: int = Field(144, description="Target render DPI")
-    max_dim_px: int = Field(2048, description="Max output dimension in pixels")
+    dpi: int = Field(144, ge=36, le=600, description="Target render DPI")
+    max_dim_px: int = Field(
+        2048, ge=1, le=8192, description="Max output dimension in pixels"
+    )
 
 
 def create_app() -> FastAPI:
@@ -88,7 +92,7 @@ def create_app() -> FastAPI:
         return HealthResponse(
             status="ok",
             operations=sorted(list(supported_operations)),
-            version="0.1.0",
+            version="0.2.0",
         )
 
     @app.get("/ready")

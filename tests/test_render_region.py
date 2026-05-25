@@ -227,10 +227,22 @@ class TestRenderRegionEndpoint:
         assert r.status_code == 400
         assert "out of range" in r.json()["detail"]["error"]
 
-    def test_negative_page_pydantic_422(self, client):
-        """Pydantic catches page < 0 before our handler — returns 422 from FastAPI."""
+    def test_negative_page_returns_400(self, client):
+        """Negative page is rejected by the renderer with a descriptive 400."""
         pdf = make_test_pdf()
         r = client.post("/api/render-region", json=self._body(pdf, page=-1))
+        assert r.status_code == 400
+        assert "page_index" in r.json()["detail"]["error"]
+
+    def test_dpi_out_of_range_returns_422(self, client):
+        """Pydantic catches dpi outside [36, 600] before the renderer runs."""
+        pdf = make_test_pdf()
+        r = client.post("/api/render-region", json=self._body(pdf, dpi=10000))
+        assert r.status_code == 422
+
+    def test_max_dim_out_of_range_returns_422(self, client):
+        pdf = make_test_pdf()
+        r = client.post("/api/render-region", json=self._body(pdf, max_dim_px=0))
         assert r.status_code == 422
 
     def test_malformed_pdf_returns_422(self, client):

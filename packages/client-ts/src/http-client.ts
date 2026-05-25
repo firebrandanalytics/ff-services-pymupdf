@@ -12,10 +12,10 @@ export type BBox = z.infer<typeof BBoxSchema>;
 
 export const RenderRegionRequestSchema = z.object({
   pdf_bytes: z.string().describe('Base64-encoded PDF data'),
-  page: z.number().int().nonnegative().describe('0-indexed page number'),
+  page: z.number().int().describe('0-indexed page number'),
   bbox: BBoxSchema,
-  dpi: z.number().int().positive().default(144),
-  max_dim_px: z.number().int().positive().default(2048),
+  dpi: z.number().int().min(36).max(600).default(144),
+  max_dim_px: z.number().int().min(1).max(8192).default(2048),
 });
 export type RenderRegionRequest = z.input<typeof RenderRegionRequestSchema>;
 
@@ -86,13 +86,16 @@ export class PyMuPDFHttpClient {
       | RenderRegionRequest
       | (Omit<RenderRegionRequest, 'pdf_bytes'> & { pdfBytes: Uint8Array }),
   ): Promise<RenderRegionResult> {
-    const body =
-      'pdfBytes' in input
-        ? { ...input, pdf_bytes: encodeBase64(input.pdfBytes), pdfBytes: undefined }
-        : input;
-    delete (body as Record<string, unknown>).pdfBytes;
+    // Always build a fresh object so we never mutate the caller's input.
+    let prepared: Record<string, unknown>;
+    if ('pdfBytes' in input) {
+      const { pdfBytes, ...rest } = input;
+      prepared = { ...rest, pdf_bytes: encodeBase64(pdfBytes) };
+    } else {
+      prepared = { ...input };
+    }
 
-    const parsed = RenderRegionRequestSchema.parse(body);
+    const parsed = RenderRegionRequestSchema.parse(prepared);
 
     const res = await this.fetchImpl(`${this.baseUrl}/api/render-region`, {
       method: 'POST',
