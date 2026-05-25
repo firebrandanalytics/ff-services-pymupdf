@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class PyMuPDFWorkerService(PyMuPDFWorkerServicer):
     """Implementation of PyMuPDFWorker gRPC service."""
 
-    VERSION = "0.1.0"
+    VERSION = "0.2.0"
 
     def __init__(self):
         self.backends: List[Backend] = [

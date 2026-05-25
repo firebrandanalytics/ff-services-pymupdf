@@ -7,12 +7,18 @@ import time
 from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .backends.base import Backend
 from .backends.text_extraction import TextExtractionBackend
 from .backends.text_layer_detection import TextLayerDetectionBackend
 from .config import get_config
+from .renderers.region import (
+    MalformedPdfError,
+    RegionRenderError,
+    render_region,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +39,28 @@ class HealthResponse(BaseModel):
     """Response body for GET /health."""
     status: str = "ok"
     operations: List[str]
-    version: str = "0.1.0"
+    version: str = "0.2.0"
+
+
+class BBox(BaseModel):
+    """Bounding box in PDF point coordinates (1/72 inch)."""
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+class RenderRegionRequest(BaseModel):
+    """Request body for POST /api/render-region."""
+    pdf_bytes: str = Field(..., description="Base64-encoded PDF data")
+    # No `ge` on page — let the renderer return 400 with a descriptive
+    # message instead of Pydantic's generic 422.
+    page: int = Field(..., description="0-indexed page number")
+    bbox: BBox
+    dpi: int = Field(144, ge=36, le=600, description="Target render DPI")
+    max_dim_px: int = Field(
+        2048, ge=1, le=8192, description="Max output dimension in pixels"
+    )
 
 
 def create_app() -> FastAPI:
@@ -41,7 +68,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="PyMuPDF Processing Service",
         description="PDF text extraction, table detection, and text layer analysis using PyMuPDF",
-        version="0.1.0",
+        version="0.2.0",
     )
 
     backends: List[Backend] = [
@@ -65,7 +92,7 @@ def create_app() -> FastAPI:
         return HealthResponse(
             status="ok",
             operations=sorted(list(supported_operations)),
-            version="0.1.0",
+            version="0.2.0",
         )
 
     @app.get("/ready")
@@ -170,6 +197,75 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.exception(f"Detection failed: {e}")
             raise HTTPException(status_code=500, detail={"success": False, "error": str(e)})
+
+    @app.post("/api/render-region")
+    async def render_region_endpoint(request: RenderRegionRequest):
+        """Render a bbox of a PDF page as a PNG image."""
+        start_time = time.time()
+
+        try:
+            pdf_data = base64.b64decode(request.pdf_bytes, validate=True)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"success": False, "error": f"Invalid base64 pdf_bytes: {e}"},
+            )
+
+        config = get_config()
+        max_bytes = config.extraction.max_file_size_mb * 1024 * 1024
+        if len(pdf_data) > max_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "error": f"File exceeds {config.extraction.max_file_size_mb}MB limit",
+                },
+            )
+
+        logger.info(
+            f"Render region request: size={len(pdf_data)} bytes, "
+            f"page={request.page}, bbox=({request.bbox.x0},{request.bbox.y0},"
+            f"{request.bbox.x1},{request.bbox.y1}), dpi={request.dpi}, "
+            f"max_dim_px={request.max_dim_px}"
+        )
+
+        try:
+            png_bytes, meta = await asyncio.to_thread(
+                render_region,
+                pdf_data,
+                request.page,
+                (request.bbox.x0, request.bbox.y0, request.bbox.x1, request.bbox.y1),
+                request.dpi,
+                request.max_dim_px,
+            )
+        except MalformedPdfError as e:
+            raise HTTPException(
+                status_code=422,
+                detail={"success": False, "error": str(e)},
+            )
+        except RegionRenderError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"success": False, "error": str(e)},
+            )
+        except Exception as e:
+            logger.exception(f"Render failed: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail={"success": False, "error": str(e)},
+            )
+
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        headers = {
+            "X-Image-Width": str(meta.width_px),
+            "X-Image-Height": str(meta.height_px),
+            "X-DPI-Used": str(meta.dpi_used),
+            "X-Page-Index": str(meta.page_index),
+            "X-Clipped-To-Page": "true" if meta.clipped_to_page else "false",
+            "X-Downscaled": "true" if meta.downscaled else "false",
+            "X-Processing-Time-Ms": str(processing_time_ms),
+        }
+        return Response(content=png_bytes, media_type="image/png", headers=headers)
 
     @app.post("/process")
     async def process_document(request: ProcessRequest) -> Dict[str, Any]:
