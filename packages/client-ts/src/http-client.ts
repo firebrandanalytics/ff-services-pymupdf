@@ -2,32 +2,45 @@ import { z } from 'zod';
 
 // ---- Zod schemas ----
 
+/**
+ * Bounding box in PDF point coordinates (1/72 inch).
+ *
+ * Note: the prior 0.2.0 schema used {x0,y0,x1,y1}. The service now matches
+ * the rest of the FireFoundry ecosystem (DocProcLayoutClient, pymupdf
+ * extract responses) which use {x_min,y_min,x_max,y_max}.
+ */
 export const BBoxSchema = z.object({
-  x0: z.number(),
-  y0: z.number(),
-  x1: z.number(),
-  y1: z.number(),
+  x_min: z.number(),
+  y_min: z.number(),
+  x_max: z.number(),
+  y_max: z.number(),
 });
 export type BBox = z.infer<typeof BBoxSchema>;
 
 export const RenderRegionRequestSchema = z.object({
-  pdf_bytes: z.string().describe('Base64-encoded PDF data'),
-  page: z.number().int().describe('0-indexed page number'),
+  /** 1-based page number, matching `/api/extract`'s page_number convention. */
+  page: z.number().int().min(1).describe('1-based page number'),
   bbox: BBoxSchema,
   dpi: z.number().int().min(36).max(600).default(144),
+  format: z.enum(['png', 'jpg']).default('png'),
   max_dim_px: z.number().int().min(1).max(8192).default(2048),
 });
 export type RenderRegionRequest = z.input<typeof RenderRegionRequestSchema>;
 
 export interface RenderRegionResult {
+  /** Encoded image bytes (PNG or JPEG, per request `format`). */
+  image: Uint8Array;
+  /** Same bytes as `image`; kept for backwards-compat with 0.2.0 callers. */
   png: Uint8Array;
+  format: 'png' | 'jpg';
   widthPx: number;
   heightPx: number;
   dpiUsed: number;
-  pageIndex: number;
+  /** 1-based page number that was rendered. */
+  pageNumber: number;
   clippedToPage: boolean;
   downscaled: boolean;
-  processingTimeMs?: number;
+  renderTimeMs?: number;
 }
 
 export interface PyMuPDFHttpClientOptions {
@@ -55,7 +68,11 @@ export class PyMuPDFServiceError extends Error {
  *
  * The gRPC client (`PyMuPDFProcessorClient`) covers `extract` and
  * `detect_text_layer`. Binary-bearing endpoints like `render-region`,
- * which return raw `image/png`, live here.
+ * which return raw image bytes, live here.
+ *
+ * As of service v0.3.0, `/api/render-region` accepts multipart/form-data
+ * (matching the existing `/api/extract` pattern). The prior JSON+base64
+ * contract has been removed.
  */
 export class PyMuPDFHttpClient {
   private readonly baseUrl: string;
@@ -76,35 +93,42 @@ export class PyMuPDFHttpClient {
   }
 
   /**
-   * Render a bbox of a single PDF page as a PNG.
+   * Render a bbox of a single PDF page as an image.
    *
-   * @param input Either an already-base64 string + bbox, or pdf bytes that
-   *   will be base64-encoded for you.
+   * The PDF bytes are sent as a multipart file part named `file`, alongside
+   * the render parameters as separate form fields. This matches the contract
+   * implemented by `DocProcLayoutClient.renderRegion` in rag-agent-bundle.
    */
   async renderRegion(
-    input:
-      | RenderRegionRequest
-      | (Omit<RenderRegionRequest, 'pdf_bytes'> & { pdfBytes: Uint8Array }),
+    pdfBytes: Uint8Array,
+    params: RenderRegionRequest,
   ): Promise<RenderRegionResult> {
-    // Always build a fresh object so we never mutate the caller's input.
-    let prepared: Record<string, unknown>;
-    if ('pdfBytes' in input) {
-      const { pdfBytes, ...rest } = input;
-      prepared = { ...rest, pdf_bytes: encodeBase64(pdfBytes) };
-    } else {
-      prepared = { ...input };
-    }
+    const parsed = RenderRegionRequestSchema.parse(params);
 
-    const parsed = RenderRegionRequestSchema.parse(prepared);
+    const form = new FormData();
+    form.append(
+      'file',
+      new Blob([new Uint8Array(pdfBytes)], { type: 'application/pdf' }),
+      'document.pdf',
+    );
+    form.append('page', String(parsed.page));
+    form.append('x_min', String(parsed.bbox.x_min));
+    form.append('y_min', String(parsed.bbox.y_min));
+    form.append('x_max', String(parsed.bbox.x_max));
+    form.append('y_max', String(parsed.bbox.y_max));
+    form.append('dpi', String(parsed.dpi));
+    form.append('format', parsed.format);
+    form.append('max_dim_px', String(parsed.max_dim_px));
 
+    const acceptHeader =
+      parsed.format === 'jpg' ? 'image/jpeg' : 'image/png';
     const res = await this.fetchImpl(`${this.baseUrl}/api/render-region`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        Accept: 'image/png',
+        Accept: acceptHeader,
         ...this.defaultHeaders,
       },
-      body: JSON.stringify(parsed),
+      body: form,
     });
 
     if (!res.ok) {
@@ -127,14 +151,16 @@ export class PyMuPDFHttpClient {
 
     const buf = new Uint8Array(await res.arrayBuffer());
     return {
+      image: buf,
       png: buf,
-      widthPx: parseIntHeader(res.headers, 'x-image-width'),
-      heightPx: parseIntHeader(res.headers, 'x-image-height'),
+      format: parsed.format,
+      widthPx: parseIntHeader(res.headers, 'x-width-px'),
+      heightPx: parseIntHeader(res.headers, 'x-height-px'),
       dpiUsed: parseIntHeader(res.headers, 'x-dpi-used'),
-      pageIndex: parseIntHeader(res.headers, 'x-page-index'),
+      pageNumber: parseIntHeader(res.headers, 'x-page-number'),
       clippedToPage: res.headers.get('x-clipped-to-page') === 'true',
       downscaled: res.headers.get('x-downscaled') === 'true',
-      processingTimeMs: tryParseIntHeader(res.headers, 'x-processing-time-ms'),
+      renderTimeMs: tryParseIntHeader(res.headers, 'x-render-time-ms'),
     };
   }
 }
@@ -152,21 +178,4 @@ function tryParseIntHeader(headers: Headers, name: string): number | undefined {
   if (v == null) return undefined;
   const n = Number.parseInt(v, 10);
   return Number.isFinite(n) ? n : undefined;
-}
-
-function encodeBase64(bytes: Uint8Array): string {
-  // Prefer Node's Buffer when available; fall back to btoa.
-  const g = globalThis as unknown as {
-    Buffer?: { from(b: Uint8Array): { toString(enc: 'base64'): string } };
-    btoa?: (s: string) => string;
-  };
-  if (g.Buffer) {
-    return g.Buffer.from(bytes).toString('base64');
-  }
-  if (g.btoa) {
-    let s = '';
-    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    return g.btoa(s);
-  }
-  throw new Error('No base64 encoder available (no Buffer, no btoa)');
 }

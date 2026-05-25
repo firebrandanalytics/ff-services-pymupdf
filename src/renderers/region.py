@@ -31,15 +31,21 @@ MIN_DPI = 36
 MAX_MAX_DIM_PX = 8192
 
 
+SUPPORTED_FORMATS = ("png", "jpg")
+# PyMuPDF accepts "jpeg" as the encode name; "jpg" is the public alias.
+_FORMAT_TO_PIXMAP_OUTPUT = {"png": "png", "jpg": "jpeg"}
+
+
 def render_region(
     pdf_data: bytes,
     page_index: int,
     bbox: Tuple[float, float, float, float],
     dpi: int = 144,
     max_dim_px: int = 2048,
+    output_format: str = "png",
 ) -> Tuple[bytes, RenderMetadata]:
     """
-    Render a bbox of a single PDF page as PNG bytes.
+    Render a bbox of a single PDF page as image bytes.
 
     Args:
         pdf_data: Raw PDF bytes.
@@ -49,13 +55,14 @@ def render_region(
         max_dim_px: If the rendered image's larger dimension exceeds this, the
             image is re-rendered at a proportionally lower DPI. Clamped to
             [1, MAX_MAX_DIM_PX].
+        output_format: "png" (default) or "jpg".
 
     Returns:
-        (png_bytes, metadata)
+        (image_bytes, metadata)
 
     Raises:
         MalformedPdfError: PDF cannot be parsed.
-        RegionRenderError: invalid bbox, page index, dpi, or max_dim_px.
+        RegionRenderError: invalid bbox, page index, dpi, max_dim_px, or format.
         RuntimeError: PyMuPDF raster operation failed.
     """
     x0, y0, x1, y1 = bbox
@@ -78,6 +85,10 @@ def render_region(
         )
     if page_index < 0:
         raise RegionRenderError(f"Invalid page_index: must be >= 0 (got {page_index})")
+    if output_format not in _FORMAT_TO_PIXMAP_OUTPUT:
+        raise RegionRenderError(
+            f"Invalid output_format: must be one of {SUPPORTED_FORMATS} (got {output_format!r})"
+        )
 
     try:
         doc = pymupdf.open(stream=pdf_data, filetype="pdf")
@@ -124,10 +135,13 @@ def render_region(
 
         dpi_used = int(round(scale * 72.0))
 
+        pixmap_output = _FORMAT_TO_PIXMAP_OUTPUT[output_format]
         try:
-            png_bytes = pix.tobytes("png")
+            image_bytes = pix.tobytes(pixmap_output)
         except Exception as e:
-            raise RuntimeError(f"PyMuPDF PNG encode failed: {e}") from e
+            raise RuntimeError(
+                f"PyMuPDF {output_format} encode failed: {e}"
+            ) from e
 
         metadata = RenderMetadata(
             width_px=pix.width,
@@ -137,6 +151,6 @@ def render_region(
             clipped_to_page=clipped_to_page,
             downscaled=downscaled,
         )
-        return png_bytes, metadata
+        return image_bytes, metadata
     finally:
         doc.close()
