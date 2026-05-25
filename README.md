@@ -71,6 +71,43 @@ Extract structured content from a PDF.
 }
 ```
 
+### `POST /api/render-region`
+Rasterize a bounding-box region of a single PDF page as a PNG image. Used by
+consumers that need image bytes for a figure or table (e.g. for attaching to
+a working-memory record).
+
+**Request:** JSON body
+```json
+{
+  "pdf_bytes": "<base64-encoded PDF>",
+  "page": 0,
+  "bbox": { "x0": 72.0, "y0": 100.0, "x1": 400.0, "y1": 300.0 },
+  "dpi": 144,
+  "max_dim_px": 2048
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pdf_bytes` | string (base64) | — | PDF data |
+| `page` | int | — | 0-indexed page number |
+| `bbox` | object | — | PDF point coordinates (1/72 inch). `x0<x1`, `y0<y1`, non-negative. Bbox is clipped to the page rect; entirely-outside bboxes return 400. |
+| `dpi` | int | `144` | Render DPI. Must be in `[36, 600]`. |
+| `max_dim_px` | int | `2048` | If the rendered PNG's larger dimension exceeds this, the image is rendered at a proportionally lower scale. Must be in `[1, 8192]`. |
+
+**Response:** `image/png` bytes. Image metadata is in response headers:
+- `X-Image-Width`, `X-Image-Height`: pixel dimensions
+- `X-DPI-Used`: effective DPI (lower than requested if downscaled)
+- `X-Page-Index`: 0-indexed page rendered
+- `X-Clipped-To-Page`: `true` if requested bbox extended past page bounds
+- `X-Downscaled`: `true` if the image was downscaled to fit `max_dim_px`
+- `X-Processing-Time-Ms`: processing time in milliseconds
+
+**Errors:**
+- `400` invalid bbox / page / dpi / max_dim_px / base64
+- `422` malformed PDF
+- `5xx` PyMuPDF render failure
+
 ### `POST /api/detect-text-layer`
 Check which pages have extractable text.
 

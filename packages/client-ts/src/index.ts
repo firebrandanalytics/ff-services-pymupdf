@@ -11,3 +11,16 @@ export {
   PyMuPDFWorkerService,
   protobufPackage,
 } from './generated/pymupdf_worker.js';
+
+export {
+  PyMuPDFHttpClient,
+  PyMuPDFServiceError,
+  BBoxSchema,
+  RenderRegionRequestSchema,
+} from './http-client.js';
+export type {
+  BBox,
+  RenderRegionRequest,
+  RenderRegionResult,
+  PyMuPDFHttpClientOptions,
+} from './http-client.js';
