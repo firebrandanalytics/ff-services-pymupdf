@@ -13,7 +13,6 @@ on:
 env:
   ACR_REGISTRY: firebranddevet.azurecr.io
   IMAGE_NAME: ff-services-pymupdf
-  LEGACY_IMAGE_NAME: doc-proc-pymupdf
 
 jobs:
   build-and-push-image:
@@ -42,8 +41,7 @@ jobs:
         if: github.ref_name == 'main' && !inputs.force
         run: |
           VERSION="${{ steps.get_version.outputs.version }}"
-          if docker manifest inspect "${{ env.ACR_REGISTRY }}/${{ env.LEGACY_IMAGE_NAME }}:${VERSION}" >/dev/null 2>&1 \
-            || docker manifest inspect "${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}" >/dev/null 2>&1; then
+          if docker manifest inspect "${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}" >/dev/null 2>&1; then
             echo "Error: image tag ${VERSION} already exists in the registry."
             echo "Increment the version in pyproject.toml, or dispatch with force=true to republish."
             exit 1
@@ -67,5 +65,3 @@ jobs:
           tags: |
             ${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.get_version.outputs.version }}
             ${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.ACR_REGISTRY }}/${{ env.LEGACY_IMAGE_NAME }}:${{ steps.get_version.outputs.version }}
-            ${{ env.ACR_REGISTRY }}/${{ env.LEGACY_IMAGE_NAME }}:latest
